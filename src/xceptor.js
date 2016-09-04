@@ -18,7 +18,8 @@ Handlers.check = function(what, value) {
   if(typeof what.test === 'function') return what.test(value);
   if(typeof what === 'function') return what(value);
 }
-Handlers.prototype = [];
+
+Handlers.prototype = []; // mixin array behavior
 Handlers.prototype.solve = function(args, resolve, reject) {
   var handlers = this;
   // This is an asynchronous recursion to traverse handlers
@@ -35,18 +36,19 @@ Handlers.prototype.solve = function(args, resolve, reject) {
       }
     };
     if(cursor < handlers.length) {
-      fixResule(handlers[cursor].apply(null, args));
+      fixResule(handlers[cursor].apply(null, args));// args = request, response, xhr
     } else {
       resolve && resolve();
     }
   };
   iterator(0);
 };
+
 Handlers.prototype.add = function(handler, method, route) {
   if(typeof handler !== 'function') return;
-  this.push(function(request, response) {
+  this.push(function(request, response, xhr) {
     if(Handlers.check(method, request.method) && Handlers.check(route, request.url)) {
-      return handler(request, response);
+      return handler(request, response, xhr);
     }
   });
 };
@@ -92,6 +94,12 @@ var Event = function(type, target) {
 // SimpleEventModel internal decorator
 var SimpleEventDecorator = function(Constructor) {
   var token = '__events__';
+
+  /*
+  object:
+    __events__:
+      event-name -> [Handlers]
+  */
   var heap = function(object, name) {
     var events = token in object ? object[token] : object[token] = {};
     return name in events ? events[name] : events[name] = [];
@@ -107,10 +115,11 @@ var SimpleEventDecorator = function(Constructor) {
   };
   var dispatchEvent = function(event) {
     var list = heap(this, event.type);
-    for(var i = 0; i < list.length; i++) list[i](event);
+    for(var i = 0; i < list.length; i++) list[i].call(this, event);
     var key = 'on' + event.type;
     if(typeof this[key] === 'function') this[key](event);
   };
+
   var SimpleEventModel = function() {
     Constructor.apply(this, arguments);
     this.addEventListener = addEventListener;
@@ -180,49 +189,56 @@ XMLHttpRequest = function() {
     }
     return allHeaders.join('\r\n');
   };
+  // do actual sending work here.
+  // send actual request each time a request handler validate to be true
   xceptor.send = function(data) {
     // Copy setter properties to 'request'
     request.data = data;
     request.withCredentials = xceptor.withCredentials;
     request.timeout = xceptor.timeout;
     // Invoke interceptor
-    requestHandlers.solve([request, response], function() {
-      // Actual actions
-      xhr.open(request.method, request.url, request.isAsync, request.username, request.password);
-      for(var i = 0; i < request.headers.length; i++) {
-        xhr.setRequestHeader(request.headers[i].header, request.headers[i].value);
-      }
-      if(request.overridedMimeType !== void 0) xhr.overrideMimeType(request.overridedMimeType);
-      // Assigning before changes, because it may be thrown in sync mode
-      if(xhr.withCredentials !== request.withCredentials) xhr.withCredentials = request.withCredentials;
-      if(xhr.timeout !== request.timeout) xhr.timeout = request.timeout;
-      xhr.send(request.data);
-    }, function() {
-      // Fake actions
-      var action = function() {
-        response.readyState = 3;
-        updateKeys(response, xceptor);
-        trigger('readystatechange');
-        response.readyState = 4;
-        updateKeys(response, xceptor);
-        complete();
-        trigger('readystatechange');
-        trigger('load');
-      };
-      // Fake async
-      if(request.isAsync) {
-        setTimeout(action);
-      } else {
-        action();
-      }
-    });
+    requestHandlers.solve([request, response, xhr],  // request handlers, send request n times of requestHandlers's length
+      function() {
+        // Actual actions
+        xhr.open(request.method, request.url, request.isAsync, request.username, request.password);
+        for(var i = 0; i < request.headers.length; i++) {
+          xhr.setRequestHeader(request.headers[i].header, request.headers[i].value);
+        }
+        if(request.overridedMimeType !== void 0) xhr.overrideMimeType(request.overridedMimeType);
+        // Assigning before changes, because it may be thrown in sync mode
+        if(xhr.withCredentials !== request.withCredentials) xhr.withCredentials = request.withCredentials;
+        if(xhr.timeout !== request.timeout) xhr.timeout = request.timeout;
+        xhr.send(request.data);
+
+      }, function() {
+        // Fake actions
+        // Rejected, still fake xhr object response behaviour
+        var action = function() {
+          response.readyState = 3;
+          updateKeys(response, xceptor);
+          trigger('readystatechange');
+          response.readyState = 4;
+          updateKeys(response, xceptor);
+          complete();
+          trigger('readystatechange');
+          trigger('load');
+        };
+        // Fake async
+        if(request.isAsync) {
+          setTimeout(action);
+        } else {
+          action();
+        }
+      });
   };
   xceptor.abort = function() {
     xhr.abort();
   };
+
   var trigger = function(name) {
     xceptor.dispatchEvent(new Event(name, xceptor));
   };
+  // set response headers & status & statusText
   var updateResponseHeaders = function() {
     if(updateResponseHeaders.disabled) return;
     updateResponseHeaders.disabled = true;
@@ -235,14 +251,15 @@ XMLHttpRequest = function() {
       response.headers.push({ header: result[1], value: result[2] });
     });
   };
-  var complete = function() {
-    responseHandlers.solve([request, response], function() {
+  var complete = function() {// when xhr done its request job
+    responseHandlers.solve([request, response, xhr], function() {
       updateKeys(response, xceptor);
     });
   };
   // Mapping response
   updateKeys(xhr, response, /^response/);
   // Mapping events
+  // initialization
   void function() {
     xhr.onreadystatechange = function() {
       updateKeys(xhr, xceptor);
@@ -273,7 +290,7 @@ XMLHttpRequest.prototype = {
   OPENED: 1,
   UNSENT: 0
 };
-
+// Wrap XMLHttpRequest with SimpleEventDecorator
 XMLHttpRequest = SimpleEventDecorator(XMLHttpRequest);
 
 // Define xceptor methods
@@ -286,6 +303,7 @@ return XMLHttpRequest.XCeptor = new function() {
   void function() {
     var methods = [ 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEADER', 'OPTIONS' ];
     for(var i = 0; i < methods.length; i++) void function(method) {
+      // dynamically inject method to that-XCeptor, create a short link to when method
       that[method.toLowerCase()] = function() {
         var args = Array.prototype.slice.call(arguments);
         return that.when.apply(that, [method].concat(args));
